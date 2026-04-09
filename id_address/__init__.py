@@ -17,7 +17,11 @@ __author__ = "Verry Simatupang"
 __license__ = "MIT"
 
 from id_address.parser import AddressParser
-from id_address.geocoder import Geocoder
-from id_address.models import AddressResult
+from id_address.geocoder import BaseGeocoder, NominatimGeocoder
+from id_address.models import AddressResult, AddressComponents
+from id_address.administrative import AdministrativeDataset
 
-__all__ = ["AddressParser", "Geocoder", "AddressResult"]
+# Backwards compatibility alias
+Geocoder = NominatimGeocoder
+
+__all__ = ["AddressParser", "Geocoder", "BaseGeocoder", "NominatimGeocoder", "AddressResult", "AddressComponents", "AdministrativeDataset"]

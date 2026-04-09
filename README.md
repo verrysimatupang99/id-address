@@ -3,19 +3,19 @@
 **Indonesian Address Parser & Geocoder** — parse messy Indonesian addresses into structured components and geocode them to coordinates.
 
 [![PyPI version](https://badge.fury.io/py/id-address.svg)](https://badge.fury.io/py/id-address)
+[![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 
 ## Why?
 
 Indonesian addresses are **chaos**. There's no standardized format, and addresses often mix:
-- Street abbreviations (`Jl.`, `Jalan`, `Jln.`, `Gg.`, `Gang`)
+- Street abbreviations (`Jl.`, `Jalan`, `Jln.`, `Gg.`, `Gang`, `Komp.`)
 - RT/RW (unique neighborhood system: `RT 05/RW 08`)
 - Administrative levels (Kelurahan → Kecamatan → Kota/Kabupaten → Provinsi)
 - Landmarks (`Sebelah Indomaret`, `Depan Masjid`)
 - Inconsistent postal codes
 
-Google Maps API is expensive. Existing parsers don't handle Indonesian formats. This library fills that gap.
+Google Maps API is expensive. Existing parsers don't handle Indonesian formats. This library fills that gap by providing a deterministic parser backed by **official Kemendagri dataset matching** and **fuzzy text matching**.
 
 ## Installation
 
@@ -28,53 +28,72 @@ pip install id-address
 ```python
 from id_address import AddressParser, Geocoder
 
-# Parse an address
 parser = AddressParser()
-result = parser.parse("Jl. M.H. Thamrin No.1, RT.02/RW.08, Gelora, Tanah Abang, Jakarta Pusat 10270")
+result = parser.parse("Jl. M.H. Thamrin No.1, RT.02/RW.08, Gelora, Tanah Abang, Jakarta Pusat")
 
-print(result.components.street)        # "Jalan M.H. Thamrin"
-print(result.components.house_number)  # "1"
-print(result.components.rt)            # "02"
-print(result.components.rw)            # "08"
-print(result.components.kelurahan)     # "Gelora"
-print(result.components.kecamatan)     # "Tanah Abang"
-print(result.components.city)          # "Jakarta Pusat"
-print(result.components.province)      # "DKI Jakarta"
-print(result.components.postal_code)   # "10270"
-
-# Geocode it
-geocoder = Geocoder()
-geocoder.geocode(result)
-print(result.latitude)   # -6.1944
-print(result.longitude)  # 106.8229
-print(result.confidence) # 0.85
+print(f"Street: {result.components.street}")
+print(f"Kelurahan: {result.components.kelurahan}")
+print(f"Kemendagri Code: {result.components.administrative_code}")
 ```
 
 ## Features
 
 ### ✅ Currently Supported
-- **Street parsing**: Jl., Jalan, Gg., Gang, Lorong, Komplek, Kavling, Blok
-- **RT/RW extraction**: `RT 05/RW 08`, `RT.003/RW.006`, etc.
-- **House numbers**: `No. 123`, `Nomor 5`, etc.
-- **Postal codes**: 5-digit Indonesian postal code detection
-- **Administrative levels**: Kelurahan, Kecamatan, City, Province (heuristic)
-- **Jakarta special cases**: Handles Jakarta Pusat/Selatan/Barat/Timur/Utara
-- **Geocoding**: Nominatim (OpenStreetMap) integration with rate limiting
-- **Reverse geocoding**: Coordinates → address
-- **Batch processing**: Parse/geocode multiple addresses
-- **Confidence scoring**: 0.0–1.0 estimate of parse quality
+- **Dataset Integration**: Matches parsed components against official Kemendagri codes.
+- **Fuzzy Matching**: Tolerates typos in Kelurahan/Kecamatan/City names via Levenshtein distance.
+- **Robust Parsing**: Handles Street prefixes, RT/RW extraction, House numbers, Postal codes.
+- **Unicode Normalization**: Automatically cleans messy encodings and HTML entities before parsing.
+- **CLI Tool**: Process massive CSVs directly from the terminal via `id-address batch`.
+- **Geocoding**: Abstract `BaseGeocoder` with a robust `NominatimGeocoder` implementation (includes exponential backoff).
+- **Graceful Failure**: Tracks ambiguity inside `result.components.parse_warnings`.
 
-### 🚧 Roadmap
-- [ ] Full Kemendagri dataset (80K+ desa/kelurahan)
-- [ ] Fuzzy matching for typos
-- [ ] React component for address input
-- [ ] CLI tool for bulk parsing
-- [ ] Support for landmarks & POI-based addresses
-- [ ] Integration with local geocoding providers
+### 🚧 Roadmap (v0.3 - v1.0)
+- [ ] Enterprise Plugins (Pandas `id_address` accessor, FastAPI Pydantic validators)
+- [ ] Multi-provider geocoding (Google Maps, Here)
+- [ ] Support for POI/Landmark based addresses via Overpass API
 
 ## Usage Examples
 
-### Parse a batch of addresses
+### Command Line Interface (CLI)
+
+Process thousands of addresses from a CSV file directly from your terminal:
+
+```bash
+# Parse a single address
+id-address parse "Jl. Merdeka No 10, RT 03/RW 05, Menteng"
+
+# Geocode a single address
+id-address geocode "Jl. Ahmad Yani, Banjarmasin"
+
+# Batch process a CSV file (must contain an 'address' column)
+id-address batch input.csv -o cleaned_addresses.csv
+```
+
+### Custom Dataset / Kemendagri Data
+
+By default, the library uses a bundled minimal sample dataset. To use the full Kemendagri dataset or your own custom administrative data, provide a JSON file formatted like so:
+
+```json
+[
+  {
+    "code": "31.71.01.1001",
+    "province": "DKI Jakarta",
+    "city": "Jakarta Pusat",
+    "kecamatan": "Tanah Abang",
+    "kelurahan": "Gelora",
+    "postal_code": "10270"
+  }
+]
+```
+
+And load it into the parser:
+
+```python
+parser = AddressParser()
+parser.load_dataset("path/to/your/custom_dataset.json")
+```
+
+### Parse a batch of addresses in Python
 
 ```python
 addresses = [
@@ -140,22 +159,6 @@ results = geocoder.geocode_batch(parsed_results, delay=1.0)  # 1 sec between req
 | `formatted` | `str` | Formatted address string |
 | `to_dict()` | `dict` | Dictionary representation |
 
-## Project Structure
-
-```
-id-address/
-├── id_address/
-│   ├── __init__.py
-│   ├── models.py        # Data models
-│   ├── parser.py        # Address parser
-│   ├── geocoder.py      # Geocoding logic
-│   └── data/            # Administrative datasets (future)
-├── tests/
-│   └── test_parser.py
-├── pyproject.toml
-└── README.md
-```
-
 ## Development
 
 ### Setup
@@ -184,24 +187,12 @@ black id_address/
 ## Data Sources
 
 - **Nominatim/OpenStreetMap**: Free geocoding (requires attribution)
-- **Kemendagri** (future): Official Indonesian administrative boundaries (80K+ villages)
-- **BPS** (future): Indonesian statistics agency geographic data
+- **Kemendagri**: Official Indonesian administrative boundaries
+- **BPS**: Indonesian statistics agency geographic data
 
 ## License
 
 MIT License — see [LICENSE](LICENSE) file.
-
-## Contributing
-
-Contributions welcome! Areas we need help:
-
-1. **Dataset collection**: Kemendagri administrative boundary data
-2. **Better parsing**: Handle more address formats & edge cases
-3. **Fuzzy matching**: Improve matching for typos & abbreviations
-4. **Documentation**: Examples, tutorials, API docs
-5. **Tests**: More test cases for different address formats
-
-Please open an issue or PR on GitHub.
 
 ## Acknowledgments
 

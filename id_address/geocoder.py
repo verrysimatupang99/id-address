@@ -6,6 +6,7 @@ import time
 import logging
 from typing import Optional
 from urllib.parse import quote
+from abc import ABC, abstractmethod
 
 import requests
 
@@ -20,7 +21,29 @@ NOMINATIM_HEADERS = {
 }
 
 
-class Geocoder:
+class BaseGeocoder(ABC):
+    """Abstract base class for geocoding providers."""
+    
+    @abstractmethod
+    def geocode(self, address_result: AddressResult) -> AddressResult:
+        """Geocode an AddressResult in-place."""
+        pass
+        
+    @abstractmethod
+    def reverse_geocode(self, latitude: float, longitude: float) -> Optional[AddressResult]:
+        """Reverse geocode coordinates to an AddressResult."""
+        pass
+        
+    def geocode_batch(self, results: list[AddressResult], delay: float = 1.0) -> list[AddressResult]:
+        """Geocode multiple addresses with rate limiting."""
+        for i, result in enumerate(results):
+            self.geocode(result)
+            if i < len(results) - 1:
+                time.sleep(delay)
+        return results
+
+
+class NominatimGeocoder(BaseGeocoder):
     """
     Geocode Indonesian addresses to coordinates.
     
@@ -28,9 +51,9 @@ class Geocoder:
     for partial matches when full address geocoding fails.
     
     Usage:
-        >>> from id_address import AddressParser, Geocoder
+        >>> from id_address import AddressParser, NominatimGeocoder
         >>> parser = AddressParser()
-        >>> geocoder = Geocoder()
+        >>> geocoder = NominatimGeocoder()
         >>> result = parser.parse("Jl. Sudirman, Jakarta Pusat")
         >>> geocoder.geocode(result)
         >>> print(result.latitude)
@@ -68,8 +91,8 @@ class Geocoder:
         if address_result.raw_input:
             coords = self._query_nominatim(address_result.raw_input)
             if coords:
-                address_result.latitude = coords["lat"]
-                address_result.longitude = coords["lon"]
+                address_result.latitude = float(coords["lat"])
+                address_result.longitude = float(coords["lon"])
                 address_result.confidence = max(address_result.confidence, float(coords.get("importance", 0.5)))
                 address_result.geocoding_source = "nominatim"
                 return address_result
@@ -79,8 +102,8 @@ class Geocoder:
         if constructed:
             coords = self._query_nominatim(constructed)
             if coords:
-                address_result.latitude = coords["lat"]
-                address_result.longitude = coords["lon"]
+                address_result.latitude = float(coords["lat"])
+                address_result.longitude = float(coords["lon"])
                 address_result.confidence = max(address_result.confidence, float(coords.get("importance", 0.4)))
                 address_result.geocoding_source = "nominatim"
                 return address_result
@@ -92,8 +115,8 @@ class Geocoder:
                 city_query += f", {address_result.components.province}"
             coords = self._query_nominatim(city_query)
             if coords:
-                address_result.latitude = coords["lat"]
-                address_result.longitude = coords["lon"]
+                address_result.latitude = float(coords["lat"])
+                address_result.longitude = float(coords["lon"])
                 address_result.confidence = 0.3
                 address_result.geocoding_source = "nominatim"
                 address_result.matched_level = "city"
@@ -101,23 +124,6 @@ class Geocoder:
         
         logger.warning(f"Could not geocode address: {address_result.raw_input}")
         return address_result
-    
-    def geocode_batch(self, results: list[AddressResult], delay: float = 1.0) -> list[AddressResult]:
-        """
-        Geocode multiple addresses with rate limiting.
-        
-        Args:
-            results: List of AddressResult from AddressParser
-            delay: Seconds between requests (Nominatim limit: 1 req/sec)
-            
-        Returns:
-            Same list with geocoded results
-        """
-        for i, result in enumerate(results):
-            self.geocode(result)
-            if i < len(results) - 1:  # Don't delay after last request
-                time.sleep(delay)
-        return results
     
     def reverse_geocode(self, latitude: float, longitude: float) -> Optional[AddressResult]:
         """
@@ -177,23 +183,36 @@ class Geocoder:
             "countrycodes": "id",  # Indonesia only
         }
         
-        try:
-            response = requests.get(
-                self.nominatim_url,
-                params=params,
-                headers=NOMINATIM_HEADERS,
-                timeout=self.timeout,
-            )
-            response.raise_for_status()
-            results = response.json()
-            
-            if results:
-                return results[0]
-            return None
-            
-        except requests.RequestException as e:
-            logger.warning(f"Nominatim query failed for '{query}': {e}")
-            return None
+        max_retries = 3
+        base_delay = 1.0
+        
+        for attempt in range(max_retries):
+            try:
+                response = requests.get(
+                    self.nominatim_url,
+                    params=params,
+                    headers=NOMINATIM_HEADERS,
+                    timeout=self.timeout,
+                )
+                
+                if response.status_code == 429:
+                    delay = base_delay * (2 ** attempt)
+                    logger.warning(f"Rate limited by Nominatim (429). Retrying in {delay}s...")
+                    time.sleep(delay)
+                    continue
+                    
+                response.raise_for_status()
+                results = response.json()
+                
+                if results:
+                    return results[0]
+                return None
+                
+            except requests.RequestException as e:
+                logger.warning(f"Nominatim query failed for '{query}': {e}")
+                return None
+                
+        return None
     
     def _construct_address(self, components) -> str:
         """Construct address string from components for geocoding."""

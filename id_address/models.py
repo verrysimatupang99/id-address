@@ -27,6 +27,12 @@ class AddressComponents:
     city: Optional[str] = None       # City/kabupaten
     province: Optional[str] = None
     
+    # Database and Error Tracking
+    administrative_code: Optional[str] = None  # Kemendagri code
+    region_type: Optional[str] = None  # "kabupaten" vs "kota"
+    raw_rtrw: Optional[str] = None  # raw string of RT/RW before parsing
+    parse_warnings: list[str] = field(default_factory=list)  # warnings during parsing
+    
     # Postal
     postal_code: Optional[str] = None
     

@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from typing import Optional
 
 from id_address.models import AddressComponents, AddressResult
+from id_address.administrative import AdministrativeDataset
 
 
 # Common Indonesian street type abbreviations
@@ -37,9 +39,9 @@ STREET_TYPES = {
 }
 
 # Regex patterns
-RT_RW_PATTERN = re.compile(r'(?:RT|rt|Rt)\s*\.?\s*(\d{2,3})\s*[/\-]\s*(?:RW|rw|Rw)\s*\.?\s*(\d{2,3})', re.IGNORECASE)
+RT_RW_PATTERN = re.compile(r'(?:RT|rt|Rt)\s*\.?\s*(\d{1,3})(?:\s*[/\-]\s*|\s+)(?:RW|rw|Rw)\s*\.?\s*(\d{1,3})', re.IGNORECASE)
 POSTAL_CODE_PATTERN = re.compile(r'\b(\d{5})\b')
-HOUSE_NUMBER_PATTERN = re.compile(r'(?:No\.?|Nomor|NO\.?)\s*\.?\s*([\d\w\-/]+)', re.IGNORECASE)
+HOUSE_NUMBER_PATTERN = re.compile(r'\b(?:No\.?|Nomor|NO\.?)\s*\.?\s*([\d\w\-/]+)', re.IGNORECASE)
 STREET_PREFIX_PATTERN = re.compile(
     r'^(Jl\.?|Jalan|Jln\.?|Gg\.?|Gang|Ln\.?|Lorong|Perum\.?|Perumahan|Komp\.?|Komplek|Kav\.?|Kavling|Blok)\s+',
     re.IGNORECASE
@@ -65,11 +67,8 @@ class AddressParser:
     """
     
     def __init__(self):
-        self._kelurahan_list: list[str] = []
-        self._kecamatan_list: list[str] = []
-        self._city_list: list[str] = []
-        self._province_list: list[str] = []
-        self._loaded = False
+        self.dataset = AdministrativeDataset()
+        self._loaded = True
     
     def load_dataset(self, dataset_path: Optional[str] = None) -> None:
         """
@@ -79,9 +78,18 @@ class AddressParser:
             dataset_path: Path to CSV/JSON file with Indonesian administrative data.
                          If None, uses bundled minimal dataset.
         """
-        # TODO: Load from Kemendagri dataset
-        # For now, we use pattern-based parsing only
+        self.dataset = AdministrativeDataset(dataset_path)
         self._loaded = True
+
+    def _normalize_text(self, text: str) -> str:
+        """Normalize unicode characters, strip HTML entities, and handle bad encodings."""
+        if not text:
+            return ""
+        # NFKC normalizes things like ligatures
+        text = unicodedata.normalize("NFKC", text)
+        # Attempt to clean bad latin-1/utf-8 double encoding
+        text = text.encode("utf-8", errors="ignore").decode("utf-8")
+        return text.strip()
     
     def parse(self, address: str) -> AddressResult:
         """
@@ -104,7 +112,9 @@ class AddressParser:
             '10270'
         """
         components = AddressComponents()
-        remaining = address.strip()
+        
+        # 0. Normalize the text (handle bad encoding)
+        remaining = self._normalize_text(address)
         
         # 1. Extract postal code (5 digits)
         postal_match = POSTAL_CODE_PATTERN.search(remaining)
@@ -115,6 +125,7 @@ class AddressParser:
         # 2. Extract RT/RW
         rt_rw_match = RT_RW_PATTERN.search(remaining)
         if rt_rw_match:
+            components.raw_rtrw = rt_rw_match.group(0).strip()
             components.rt = rt_rw_match.group(1).lstrip("0") or "0"
             components.rw = rt_rw_match.group(2).lstrip("0") or "0"
             remaining = remaining[:rt_rw_match.start()] + remaining[rt_rw_match.end():]
@@ -126,25 +137,55 @@ class AddressParser:
             # Don't remove from remaining — number might be part of address
         
         # 4. Parse comma-separated parts (common format)
-        parts = [p.strip() for p in remaining.split(",")]
+        parts = [p.strip() for p in remaining.split(",") if p.strip()]
         
         # Try to identify street address (usually first part)
         if parts:
             first_part = parts[0].strip()
+            
+            # Extract explicit Kel/Kec/Ds from the first part if no commas separated them
+            for kw in [" kecamatan ", " kec ", " kec. "]:
+                idx = first_part.lower().find(kw)
+                if idx != -1:
+                    if not components.kecamatan:
+                        components.kecamatan = first_part[idx + len(kw):].strip()
+                    first_part = first_part[:idx].strip()
+                    break
+                    
+            for kw in [" kelurahan ", " kel ", " kel. ", " desa ", " ds ", " ds. "]:
+                idx = first_part.lower().find(kw)
+                if idx != -1:
+                    if not components.kelurahan:
+                        components.kelurahan = first_part[idx + len(kw):].strip()
+                    first_part = first_part[:idx].strip()
+                    break
+            
             street_match = STREET_PREFIX_PATTERN.match(first_part)
             if street_match:
                 type_str = street_match.group(1)
                 components.street_type = STREET_TYPES.get(type_str.lower(), type_str)
                 rest_of_street = first_part[street_match.end():].strip()
                 
-                # Remove house number if present
-                house_in_street = HOUSE_NUMBER_PATTERN.match(rest_of_street)
-                if house_in_street and not components.house_number:
-                    components.house_number = house_in_street.group(1)
-                    rest_of_street = rest_of_street[house_in_street.end():].strip()
+                # Remove house number if present anywhere in the street string
+                house_in_street = HOUSE_NUMBER_PATTERN.search(rest_of_street)
+                if house_in_street:
+                    if not components.house_number:
+                        components.house_number = house_in_street.group(1)
+                    rest_of_street = rest_of_street[:house_in_street.start()].strip()
                 
                 components.street_name = rest_of_street
                 components.street = f"{components.street_type} {rest_of_street}".strip()
+                parts = parts[1:]
+            else:
+                # If no street prefix, the whole first part might be the street/building
+                house_in_street = HOUSE_NUMBER_PATTERN.search(first_part)
+                if house_in_street:
+                    if not components.house_number:
+                        components.house_number = house_in_street.group(1)
+                    first_part = first_part[:house_in_street.start()].strip()
+                    
+                if first_part and not components.street:
+                    components.street = first_part
                 parts = parts[1:]
         
         # 5. Try to match remaining parts to administrative levels
@@ -197,6 +238,47 @@ class AddressParser:
         """Parse multiple addresses."""
         return [self.parse(addr) for addr in addresses]
     
+    def _enrich_from_dataset(self, components: AddressComponents) -> None:
+        """Enrich and validate parsed components using the administrative dataset."""
+        code = None
+        # Start matching from smallest to largest to get the most specific code
+        if components.kelurahan:
+            match_code, score, is_fuzzy = self.dataset.match_kelurahan(components.kelurahan)
+            if match_code:
+                code = match_code
+                if is_fuzzy:
+                    components.parse_warnings.append(f"Fuzzy matched kelurahan '{components.kelurahan}' to score {score:.1f}")
+        
+        if not code and components.kecamatan:
+            match_code, score, is_fuzzy = self.dataset.match_kecamatan(components.kecamatan)
+            if match_code:
+                code = match_code
+                if is_fuzzy:
+                    components.parse_warnings.append(f"Fuzzy matched kecamatan '{components.kecamatan}' to score {score:.1f}")
+                    
+        if not code and components.city:
+            match_code, score, is_fuzzy = self.dataset.match_city(components.city)
+            if match_code:
+                code = match_code
+                if is_fuzzy:
+                    components.parse_warnings.append(f"Fuzzy matched city '{components.city}' to score {score:.1f}")
+                    
+        if code:
+            components.administrative_code = code
+            row = self.dataset.get_row_by_code(code)
+            if row:
+                # Standardize the names based on dataset
+                if row.get("kelurahan") and (components.kelurahan or code == self.dataset.match_kelurahan(row.get("kelurahan", ""))[0]):
+                    components.kelurahan = row.get("kelurahan")
+                if row.get("kecamatan"):
+                    components.kecamatan = row.get("kecamatan")
+                if row.get("city"):
+                    components.city = row.get("city")
+                if row.get("province"):
+                    components.province = row.get("province")
+                if row.get("postal_code") and not components.postal_code:
+                    components.postal_code = row.get("postal_code")
+
     def _calculate_confidence(self, components: AddressComponents, raw: str) -> float:
         """Estimate parsing confidence based on extracted components."""
         score = 0.0
