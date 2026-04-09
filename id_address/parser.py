@@ -256,10 +256,31 @@ class AddressParser:
                         components.province = "DKI Jakarta"
                 
                 # Check for explicit keywords at the end of the street string
-                keywords = ["kota", "kabupaten", "kab", "kecamatan", "kec", "kelurahan", "kel", "desa", "ds", "provinsi", "prov"]
+                # We can do a reverse split to pull off City or Kecamatan if they aren't comma separated.
+                # Example: "Jl. Jend. Sudirman No. 10 RT 01 RW 02 Kbyran Baru Jakarta Selatan"
                 street_parts = components.street.split()
-                # A more robust approach is left for future updates when integrating full datasets.
-                # For now, let Kemendagri dataset matching (which runs next) do the heavy lifting via fuzzy match.
+                if not components.city and len(street_parts) > 2:
+                    # Let's see if the last two words match a city in our dataset list
+                    last_two = f"{street_parts[-2]} {street_parts[-1]}"
+                    if self._loaded and self.dataset._cities_list:
+                        match_code, score, _ = self.dataset.match_city(last_two)
+                        if match_code and score > 85:
+                            components.city = last_two
+                            components.street = " ".join(street_parts[:-2])
+                            street_parts = components.street.split()
+
+                if not components.kecamatan and len(street_parts) > 1:
+                    # check last one or two words for kecamatan
+                    for num_words in (2, 1):
+                        if len(street_parts) >= num_words:
+                            tail_words = " ".join(street_parts[-num_words:])
+                            if self._loaded and self.dataset._kecamatans_list:
+                                match_code, score, _ = self.dataset.match_kecamatan(tail_words)
+                                if match_code and score > 85:
+                                    components.kecamatan = tail_words
+                                    components.street = " ".join(street_parts[:-num_words])
+                                    street_parts = components.street.split()
+                                    break
         
         # Cross-reference with Kemendagri dataset
         if self._loaded and self.dataset.data:
