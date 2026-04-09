@@ -187,6 +187,15 @@ class AddressParser:
                 if first_part and not components.street:
                     components.street = first_part
                 parts = parts[1:]
+                
+                # If there are still leftovers from first_part (like City/Province separated by space), 
+                # we should add them back to parts for the next step to process, but only if we had 0 commas originally.
+                # Actually, our explicit Kel/Kec extraction modifies first_part, and we only assigned the remaining to components.street.
+                # So if they typed "Jl Sudirman Kbyran Baru Jakarta Selatan"
+                # first_part = "Jl Sudirman Kbyran Baru Jakarta Selatan"
+                # components.street = "Jalan Sudirman Kbyran Baru Jakarta Selatan"
+                # This means without commas, the whole string becomes the street.
+                # We should extract the city and province from the end of the string.
         
         # 5. Try to match remaining parts to administrative levels
         # This is heuristic — proper matching needs the full dataset
@@ -212,16 +221,49 @@ class AddressParser:
             
             # If not Jakarta, try to assign remaining parts
             if not components.city and len(parts) >= 2:
-                # Second-to-last might be city, third might be province
-                if len(parts) >= 3:
-                    components.province = parts[-1].strip()
-                    components.city = parts[-2].strip()
-                    if len(parts) >= 4:
-                        components.kecamatan = parts[-3].strip()
-                        if len(parts) >= 5:
-                            components.kelurahan = parts[-4].strip()
-                else:
-                    components.city = parts[-1].strip()
+                # Iterate through parts and look for explicit keywords first
+                for p in parts:
+                    p_lower = p.lower()
+                    if p_lower.startswith("kota ") or p_lower.startswith("kabupaten ") or p_lower.startswith("kab "):
+                        components.city = p
+                    elif p_lower.startswith("kecamatan ") or p_lower.startswith("kec "):
+                        components.kecamatan = p
+                    elif p_lower.startswith("kelurahan ") or p_lower.startswith("kel "):
+                        components.kelurahan = p
+                    elif p_lower.startswith("provinsi ") or p_lower.startswith("prov "):
+                        components.province = p
+                
+                # For any unassigned parts, fallback to index-based heuristics
+                # Remove parts that were already explicitly assigned
+                unassigned = [p for p in parts if p not in (components.city, components.kecamatan, components.kelurahan, components.province)]
+                
+                if unassigned:
+                    if not components.city and len(unassigned) >= 2:
+                        components.city = unassigned[-2].strip()
+                        if not components.province:
+                            components.province = unassigned[-1].strip()
+                    elif not components.city and len(unassigned) == 1:
+                        components.city = unassigned[-1].strip()
+        else:
+            # No commas were found, parts is empty. The entire remaining string is in components.street.
+            # We need to extract the city/province from the end of the street string.
+            if components.street:
+                jakarta_match = re.search(r'\b(jakarta\s+(pusat|selatan|barat|timur|utara))\b', components.street, re.IGNORECASE)
+                if jakarta_match:
+                    components.city = f"Jakarta {jakarta_match.group(2).title()}"
+                    components.street = components.street[:jakarta_match.start()].strip()
+                    if not components.province:
+                        components.province = "DKI Jakarta"
+                
+                # Check for explicit keywords at the end of the street string
+                keywords = ["kota", "kabupaten", "kab", "kecamatan", "kec", "kelurahan", "kel", "desa", "ds", "provinsi", "prov"]
+                street_parts = components.street.split()
+                # A more robust approach is left for future updates when integrating full datasets.
+                # For now, let Kemendagri dataset matching (which runs next) do the heavy lifting via fuzzy match.
+        
+        # Cross-reference with Kemendagri dataset
+        if self._loaded and self.dataset.data:
+            self._enrich_from_dataset(components)
         
         # Calculate confidence based on how much we parsed
         confidence = self._calculate_confidence(components, address)
